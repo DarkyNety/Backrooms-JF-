@@ -807,6 +807,17 @@ axeRig.add(axeModelGrp);
 /* Состояние анимации топора (заряд ЛКМ → замах → рубящий удар) */
 const axeAnim = { cooldown: 0, anim: 0, target: 0, charging: false, chargeStart: 0 };
 let axeShakeT = 0, axeShakeAmp = 0;
+
+/* ---------- Состояние анимации дробовика ---------- */
+const shotgunAnim = {
+  cooldown: 0,        // перезарядка между выстрелами
+  drawAnim: 0,        // анимация доставания (0-1)
+  drawTarget: 0,      // цель для drawAnim
+  recoil: 0,          // текущая отдача
+  recoilTarget: 0,    // цель отдачи
+  pumpOffset: 0,      // смещение цевья при перезарядке
+  fireAnim: 0         // анимация выстрела (вспышка/затвор)
+};
 function updateAxeRig(dt) {
   const A = axeAnim;
   if (A.cooldown > 0) A.cooldown -= dt;
@@ -848,6 +859,226 @@ function startAxeSwing(power) {
 }
 
 let shotgunCooldown = 0;
+
+/* ---------- Система трассеров пуль дробовика ---------- */
+const pelletTrails = [];
+const maxPelletTrails = 24;
+const pelletTrailMat = new THREE.LineBasicMaterial({ color: 0xffaa33, transparent: true, opacity: 0.8 });
+
+// Инициализация пулов трассеров
+for (let i = 0; i < maxPelletTrails; i++) {
+  const positions = new Float32Array(6); // 2 точки * 3 координаты
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const line = new THREE.Line(geometry, pelletTrailMat.clone());
+  line.visible = false;
+  scene.add(line);
+  pelletTrails.push({ line, age: -1, maxAge: 0.15 });
+}
+
+/* ---------- Система видимых пуль/дробин для дробовика ---------- */
+const pelletBullets = [];
+const maxPelletBullets = 48;
+const pelletGeo = new THREE.SphereGeometry(0.02, 6, 6);
+const pelletMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.95 });
+
+for (let i = 0; i < maxPelletBullets; i++) {
+  const mesh = new THREE.Mesh(pelletGeo, pelletMat.clone());
+  mesh.visible = false;
+  scene.add(mesh);
+  pelletBullets.push({ 
+    mesh, 
+    velocity: new THREE.Vector3(), 
+    age: -1, 
+    maxAge: 0.3,
+    origin: new THREE.Vector3()
+  });
+}
+
+/* ---------- Гильзы от дробовика ---------- */
+const shellCasings = [];
+const maxShellCasings = 32;
+const casingGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.05, 8);
+casingGeo.translate(0, 0.025, 0);
+const casingMat = new THREE.MeshStandardMaterial({ 
+  color: 0xcc8844, 
+  roughness: 0.3, 
+  metalness: 0.85,
+  emissive: 0x442200,
+  emissiveIntensity: 0.2
+});
+
+for (let i = 0; i < maxShellCasings; i++) {
+  const mesh = new THREE.Mesh(casingGeo, casingMat.clone());
+  mesh.visible = false;
+  mesh.castShadow = true;
+  scene.add(mesh);
+  shellCasings.push({ 
+    mesh, 
+    velocity: new THREE.Vector3(), 
+    angularVel: new THREE.Vector3(),
+    age: -1, 
+    maxAge: 8.0,
+    grounded: false
+  });
+}
+
+function spawnPelletTrail(origin, direction) {
+  // Найти свободный трассер
+  for (let i = 0; i < maxPelletTrails; i++) {
+    const trail = pelletTrails[i];
+    if (trail.age < 0) {
+      trail.age = 0;
+      const end = origin.clone().addScaledVector(direction, 2.5);
+      const positions = trail.line.geometry.attributes.position.array;
+      positions[0] = origin.x; positions[1] = origin.y; positions[2] = origin.z;
+      positions[3] = end.x; positions[4] = end.y; positions[5] = end.z;
+      trail.line.geometry.attributes.position.needsUpdate = true;
+      trail.line.visible = true;
+      trail.line.material.opacity = 0.9;
+      return;
+    }
+  }
+}
+
+function spawnPelletBullet(origin, direction) {
+  // Создать видимую пулю/дробину
+  for (let i = 0; i < maxPelletBullets; i++) {
+    const bullet = pelletBullets[i];
+    if (bullet.age < 0) {
+      bullet.age = 0;
+      bullet.origin.copy(origin);
+      bullet.velocity.copy(direction).multiplyScalar(80); // Скорость полёта
+      bullet.mesh.position.copy(origin);
+      bullet.mesh.visible = true;
+      bullet.mesh.material.opacity = 0.95;
+      bullet.mesh.scale.setScalar(1);
+      return;
+    }
+  }
+}
+
+function spawnShellCasing(origin, rightDir, upDir) {
+  // Выбросить гильзу вправо-вниз с вращением
+  for (let i = 0; i < maxShellCasings; i++) {
+    const casing = shellCasings[i];
+    if (casing.age < 0) {
+      casing.age = 0;
+      casing.grounded = false;
+      
+      // Позиция выброса - справа от оружия
+      const ejectPos = origin.clone()
+        .addScaledVector(rightDir, 0.15)
+        .addScaledVector(upDir, 0.08)
+        .addScaledVector(new THREE.Vector3().crossVectors(rightDir, upDir), -0.1);
+      
+      casing.mesh.position.copy(ejectPos);
+      casing.mesh.visible = true;
+      casing.mesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+      
+      // Скорость выброса: вправо, немного вверх и назад
+      const ejectVel = rightDir.clone()
+        .multiplyScalar(2.5 + Math.random())
+        .add(upDir.clone().multiplyScalar(1.5 + Math.random()))
+        .add(new THREE.Vector3().crossVectors(rightDir, upDir).multiplyScalar(-0.5 - Math.random() * 0.5));
+      
+      casing.velocity.copy(ejectVel);
+      casing.angularVel.set(
+        (Math.random() - 0.5) * 15,
+        (Math.random() - 0.5) * 15,
+        (Math.random() - 0.5) * 15
+      );
+      casing.mesh.material.opacity = 1;
+      casing.mesh.material.emissiveIntensity = 0.3;
+      return;
+    }
+  }
+}
+
+function updatePelletTrails(dt) {
+  for (let i = 0; i < maxPelletTrails; i++) {
+    const trail = pelletTrails[i];
+    if (trail.age < 0) continue;
+    
+    trail.age += dt;
+    if (trail.age >= trail.maxAge) {
+      trail.line.visible = false;
+      trail.age = -1;
+      continue;
+    }
+    
+    // Исчезновение
+    const lifeF = 1 - trail.age / trail.maxAge;
+    trail.line.material.opacity = lifeF * 0.9;
+  }
+}
+
+function updatePelletBullets(dt) {
+  for (let i = 0; i < maxPelletBullets; i++) {
+    const bullet = pelletBullets[i];
+    if (bullet.age < 0) continue;
+    
+    bullet.age += dt;
+    if (bullet.age >= bullet.maxAge) {
+      bullet.mesh.visible = false;
+      bullet.age = -1;
+      continue;
+    }
+    
+    // Движение пули
+    bullet.mesh.position.addScaledVector(bullet.velocity, dt);
+    
+    // Исчезновение
+    const lifeF = 1 - bullet.age / bullet.maxAge;
+    bullet.mesh.material.opacity = lifeF * 0.95;
+    bullet.mesh.scale.setScalar(lifeF);
+  }
+}
+
+function updateShellCasings(dt) {
+  for (let i = 0; i < maxShellCasings; i++) {
+    const casing = shellCasings[i];
+    if (casing.age < 0) continue;
+    
+    casing.age += dt;
+    if (casing.age >= casing.maxAge) {
+      casing.mesh.visible = false;
+      casing.age = -1;
+      continue;
+    }
+    
+    if (!casing.grounded) {
+      // Гравитация
+      casing.velocity.y -= 9.8 * dt;
+      casing.mesh.position.addScaledVector(casing.velocity, dt);
+      casing.mesh.rotation.x += casing.angularVel.x * dt;
+      casing.mesh.rotation.y += casing.angularVel.y * dt;
+      casing.mesh.rotation.z += casing.angularVel.z * dt;
+      
+      // Столкновение с полом
+      if (casing.mesh.position.y <= 0.02) {
+        casing.mesh.position.y = 0.02;
+        casing.velocity.y = Math.abs(casing.velocity.y) * 0.3;
+        casing.velocity.x *= 0.6;
+        casing.velocity.z *= 0.6;
+        casing.angularVel.multiplyScalar(0.7);
+        
+        // Если скорость очень мала, считаем гильзу лежащей на полу
+        if (Math.abs(casing.velocity.y) < 0.1) {
+          casing.grounded = true;
+          casing.velocity.set(0, 0, 0);
+          casing.angularVel.set(0, 0, 0);
+        }
+      }
+    }
+    
+    // Постепенное затухание свечения
+    if (casing.mesh.material.emissiveIntensity > 0.02) {
+      casing.mesh.material.emissiveIntensity -= dt * 0.5;
+    }
+  }
+}
+
 function fireShotgun() {
   if (shotgunCooldown > 0 || inv.shells <= 0) {
     if (inv.shells <= 0) noteShow('НЕТ ПАТРОНОВ');
@@ -856,6 +1087,10 @@ function fireShotgun() {
   inv.shells--;
   shotgunCooldown = 0.8;
   updateInvSlotShotgun();
+  
+  // Анимация отдачи
+  shotgunAnim.recoilTarget = 0.18;
+  shotgunAnim.fireAnim = 1.0; // Запуск анимации выстрела
   
   // Звук выстрела
   AudioSys.shotgun();
@@ -878,7 +1113,14 @@ function fireShotgun() {
     d.z += (Math.random() - 0.5) * spread;
     d.normalize();
     
-    const ray = new THREE.Raycaster(origin, d, 0, 25);
+    // Создаём трассер для каждой дробины
+    const muzzleOrigin = camera.position.clone().addScaledVector(dir, 0.5);
+    spawnPelletTrail(muzzleOrigin, d);
+    
+    // Создаём видимую пулю/дробину
+    spawnPelletBullet(muzzleOrigin, d);
+    
+    const ray = new THREE.Raycaster(muzzleOrigin, d, 0, 25);
     
     // Проверка предметов
     const hits = ray.intersectObjects(propRoots, true);
@@ -909,6 +1151,11 @@ function fireShotgun() {
       spawnSparks(wallHits[0].point, 4, 0xffcc66, 1.5);
     }
   }
+  
+  // Выброс гильзы (один раз за выстрел)
+  const rightDir = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const upDir = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  spawnShellCasing(camera.position.clone().addScaledVector(rightDir, 0.3), rightDir, upDir);
   
   // Разбить близкие лампы
   for (const f of fixturesAll) {
@@ -1395,6 +1642,7 @@ function boundaryOpen(gx, gy, type) {
 const chunks = new Map();             // "cx,cz" -> chunk
 const propRoots = [];                 // все предметы в загруженных чанках (+ предмет в руках)
 const dynamicProps = [];              // предметы в симуляции (брошенные)
+const globalProps = [];               // ВСЕ предметы в мире (для сохранения при выгрузке чанков)
 let heldProp = null;                  // предмет в руках игрока
 let activeColliders = [];             // плоский список AABB loaded-чанков
 let litFixtures = [];                 // все лампы (stable+flicker) loaded-чанков
@@ -1557,7 +1805,7 @@ function generateChunk(cx, cz) {
     );
     prop.rotation.y = hash3(gx, gz, 0xA7B) * Math.PI * 2;
     group.add(prop);
-    propRoots.push(prop); props.push(prop);
+    propRoots.push(prop); props.push(prop); globalProps.push(prop);
     if (kind === 'lamp') ownMats.push(prop.userData.bulbMat);
     // На столе/стуле могут быть коробка, топор, спички или батарейка — предмет получает опору
     if ((kind === 'table' && hash3(gx, gz, 0xA7C) < 0.25) || (kind === 'chair' && hash3(gx, gz, 0xA7C) < 0.12)) {
@@ -1574,7 +1822,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA80) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item);
+      propRoots.push(item); props.push(item); dynamicProps.push(item); globalProps.push(item);
     }
     // На коробке может стоять батарейка или коробок спичек
     if (kind === 'box' && hash3(gx, gz, 0xA81) < 0.14) {
@@ -1587,7 +1835,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA84) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item);
+      propRoots.push(item); props.push(item); dynamicProps.push(item); globalProps.push(item);
     }
   }
 
@@ -1604,7 +1852,7 @@ function generateChunk(cx, cz) {
     );
     mn.rotation.y = hash3(gx, gz, 0xA93) * Math.PI * 2;  // стоит и «смотрит» в случайную сторону
     group.add(mn);
-    propRoots.push(mn); props.push(mn);
+    propRoots.push(mn); props.push(mn); globalProps.push(mn);
   }
 
   /* --- 9.8 Мелочёвка на полу: спичечные коробки и батарейки находятся уверенно --- */
@@ -1621,7 +1869,7 @@ function generateChunk(cx, cz) {
     );
     it.rotation.y = hash3(gx, gz, 0xA99) * Math.PI * 2;
     group.add(it);
-    propRoots.push(it); props.push(it); dynamicProps.push(it);
+    propRoots.push(it); props.push(it); dynamicProps.push(it); globalProps.push(it);
   }
 
   scene.add(group);
@@ -1629,6 +1877,23 @@ function generateChunk(cx, cz) {
 }
 
 function disposeChunk(ch) {
+  // Сначала сохраняем все предметы в сцену ДО удаления группы чанка
+  ch.props.forEach(p => {
+    let i = propRoots.indexOf(p);   if (i >= 0) propRoots.splice(i, 1);
+    i = dynamicProps.indexOf(p);    if (i >= 0) dynamicProps.splice(i, 1);
+    // Предмет в руках не теряется с чанком
+    if (p === heldProp) {
+      if (p.parent) p.parent.remove(p);
+      scene.add(p);
+      return;
+    }
+    // Все предметы сохраняются в сцене при выгрузке чанка, чтобы их можно было подобрать/взаимодействовать
+    if (p.parent) p.parent.remove(p);
+    scene.add(p);
+    propRoots.push(p);
+    // НЕ удаляем из globalProps - предмет остаётся в глобальном списке
+  });
+  
   scene.remove(ch.group);
   ch.ownGeos.forEach(g => g.dispose());
   ch.ownMats.forEach(m => {
@@ -1636,21 +1901,6 @@ function disposeChunk(ch) {
     m.dispose();
   });
   ch.instanced.forEach(im => im.dispose());
-  ch.props.forEach(p => {
-    let i = propRoots.indexOf(p);   if (i >= 0) propRoots.splice(i, 1);
-    i = dynamicProps.indexOf(p);    if (i >= 0) dynamicProps.splice(i, 1);
-    // Предмет в руках не теряется с чанком
-    if (p === heldProp) {
-      scene.add(p);
-      return;
-    }
-    // Важные предметы (оружие, ПНВ) сохраняются в сцене
-    const kind = p.userData.kind;
-    if (kind === 'axe' || kind === 'shotgun' || kind === 'nvg') {
-      scene.add(p);
-      propRoots.push(p); // Возвращаем в propRoots, чтобы можно было подобрать
-    }
-  });
 }
 
 function rebuildActiveLists() {
@@ -1663,6 +1913,16 @@ function rebuildActiveLists() {
       if (f.state !== 2) litFixtures.push(f);
       if (f.state === 1) flickerFixtures.push(f);
     });
+    // Добавляем предметы чанка в propRoots и dynamicProps
+    ch.props.forEach(p => {
+      if (propRoots.indexOf(p) < 0) propRoots.push(p);
+      if (p.userData && !p.userData.sleeping && dynamicProps.indexOf(p) < 0) dynamicProps.push(p);
+    });
+  });
+  // Также добавляем все глобальные предметы, которые не в чанках (выброшенные игроком)
+  globalProps.forEach(p => {
+    if (p.parent === scene && propRoots.indexOf(p) < 0) propRoots.push(p);
+    if (p.userData && !p.userData.sleeping && p !== heldProp && dynamicProps.indexOf(p) < 0) dynamicProps.push(p);
   });
 }
 
@@ -1735,6 +1995,7 @@ let zoomFov = 75, flashIntensity = 0;
 let started = false, startT = 0;
 
 let noclip = false;
+
 const player = {
   pos: new THREE.Vector3(CELL * 0.5, 0, CELL * 0.5),
   vel: new THREE.Vector3(),
@@ -1800,27 +2061,38 @@ window.addEventListener('keydown', e => {
         prop.visible = false;
         prop.userData.velocity.set(0, 0, 0);
         prop.userData.angularVel.set(0, 0, 0);
+        // Удаляем из globalProps и dynamicProps
+        const idxG = globalProps.indexOf(prop);
+        if (idxG >= 0) globalProps.splice(idxG, 1);
+        const idxD = dynamicProps.indexOf(prop);
+        if (idxD >= 0) dynamicProps.splice(idxD, 1);
         inv.shotgun = true;
-        inv.shotgunProp = prop; // Сохраняем объект в инвентаре
+        inv.shotgunProp = prop;
         updateInvSlotShotgun();
         noteShow('ДРОБОВИК УБРАН');
       } else if (inv.shotgun && !heldProp) {
         // Достать дробовик из инвентаря
-        const p = inv.shotgunProp || makeProp('shotgun');
-        if (inv.shotgunProp) {
-          inv.shotgunProp.visible = true;
-          inv.shotgunProp.position.copy(camera.position);
-        } else {
-          p.position.copy(camera.position);
-          scene.add(p);
+        const p = inv.shotgunProp;
+        if (p) {
+          heldProp = p;
+          p.userData.velocity.set(0, 0, 0);
+          p.userData.angularVel.set(0, 0, 0);
+          inv.shotgun = false;
+          inv.shotgunProp = null;
+          updateInvSlotShotgun();
+          noteShow('ДРОБОВИК В РУКАХ · ЛКМ — ВЫСТРЕЛ · R — ПЕРЕЗАРЯДКА');
         }
-        heldProp = p;
-        p.userData.velocity.set(0, 0, 0);
-        p.userData.angularVel.set(0, 0, 0);
-        inv.shotgun = false;
-        inv.shotgunProp = null;
-        updateInvSlotShotgun();
-        noteShow('ДРОБОВИК В РУКАХ · ЛКМ — ВЫСТРЕЛ · R — ПЕРЕЗАРЯДКА');
+      } else if (!heldProp) {
+        // Если дробовик не в инвентаре, ищем его в мире
+        let foundShotgun = null;
+        scene.traverse((obj) => {
+          if (obj.userData && obj.userData.kind === 'shotgun' && !foundShotgun) {
+            foundShotgun = obj;
+          }
+        });
+        if (foundShotgun) {
+          pickUp(foundShotgun, true);
+        }
       }
     }
     // Перезарядка дробовика на R
@@ -2134,6 +2406,7 @@ function removePropFromWorld(prop) {
   if (prop.parent) prop.parent.remove(prop);
   let i = propRoots.indexOf(prop); if (i >= 0) propRoots.splice(i, 1);
   i = dynamicProps.indexOf(prop);  if (i >= 0) dynamicProps.splice(i, 1);
+  i = globalProps.indexOf(prop);   if (i >= 0) globalProps.splice(i, 1);
 }
 
 function pickUp(prop, forceEquip = false) {
@@ -2214,6 +2487,7 @@ function pickUp(prop, forceEquip = false) {
   axeAnim.charging = false;
   elChargeOuter.style.opacity = '0'; elChargeInner.style.width = '0%';
   const i = dynamicProps.indexOf(prop); if (i >= 0) dynamicProps.splice(i, 1);
+  const g = globalProps.indexOf(prop); if (g >= 0) globalProps.splice(g, 1);
   AudioSys.click(520);
 }
 
@@ -2234,6 +2508,7 @@ function placeHeld() {
   prop.userData.stuck = false;
   prop.userData.sleeping = false;
   dynamicProps.push(prop);
+  globalProps.push(prop);                     // возвращаем в глобальный список
   AudioSys.click(420);
 }
 
@@ -2247,7 +2522,20 @@ function throwHeld(power) {
   prop.userData.support = null;
   prop.userData.stuck = false;
   prop.userData.sleeping = false;
-  if (prop.userData.kind === 'axe') {
+  
+  // Если это дробовик, сбрасываем его состояние и возвращаем в мир
+  if (prop.userData.kind === 'shotgun') {
+    prop.quaternion.set(0, 0, 0, 1); // Сброс вращения
+    const vel = fwd.multiplyScalar(3.5 + power * 8);
+    vel.y += 1.2 + power * 2;
+    prop.userData.velocity.copy(vel);
+    prop.userData.angularVel.set(
+      (Math.random() - 0.5) * 6 * power + 1.5,
+      (Math.random() - 0.5) * 4 * power,
+      (Math.random() - 0.5) * 6 * power + 1.5
+    );
+    AudioSys.step(0.9);
+  } else if (prop.userData.kind === 'axe') {
     axeModelGrp.getWorldQuaternion(_axeWQ);           // вылетает в том повороте, как был в руке
     prop.quaternion.copy(_axeWQ);
     axeAnim.charging = false;
@@ -2275,6 +2563,7 @@ function throwHeld(power) {
     AudioSys.step(0.9);
   }
   dynamicProps.push(prop);
+  globalProps.push(prop);                             // возвращаем в глобальный список
 }
 
 function toggleLampHeld() {
@@ -2498,25 +2787,66 @@ function updateHeld(dt) {
     heldProp.visible = false;
     heldProp.position.copy(camera.position);
     shotgunRig.visible = true;
-    // Анимация перезарядки: смещение цевья
+    
+    // Анимация доставания: плавное появление
+    const S = shotgunAnim;
+    if (S.drawAnim < 1) {
+      S.drawAnim += dt * 4;
+      if (S.drawAnim > 1) S.drawAnim = 1;
+    }
+    const drawLerp = S.drawAnim;
+    
+    // Анимация отдачи после выстрела
+    if (S.recoil > 0.001) {
+      S.recoil -= dt * 3;
+      if (S.recoil < 0) S.recoil = 0;
+    } else if (S.recoilTarget > 0.001) {
+      S.recoil = S.recoilTarget;
+      S.recoilTarget = 0;
+    }
+    
+    // Анимация выстрела (затвор/вспышка)
+    if (S.fireAnim > 0.001) {
+      S.fireAnim -= dt * 8; // Быстрое затухание
+      if (S.fireAnim < 0) S.fireAnim = 0;
+      
+      // Добавляем микро-смещение цевья назад при выстреле
+      const fireOffset = S.fireAnim * 0.04;
+      shotgunModelGrp.position.z = -fireOffset;
+    }
+    
+    // Смещение цевья при перезарядке
     if (shotgunReloading) {
       shotgunModelGrp.position.z = shotgunPumpOffset;
     } else {
       shotgunModelGrp.position.z = 0;
     }
-    // Покачивание при ходьбе
+    
+    // Покачивание при ходьбе + анимация доставания и отдачи
     const isMoving = player.vel.lengthSq() > 0.1;
+    const baseY = -0.35;
+    const baseX = 0.45;
+    const baseRotZ = 0;
+    
     if (isMoving && player.grounded) {
       const bobPhase = player.bobPhase;
-      shotgunRig.position.y += (-0.35 + Math.sin(bobPhase * 2) * 0.015 - shotgunRig.position.y) * Math.min(1, 12 * dt);
-      shotgunRig.position.x += (0.45 + Math.cos(bobPhase) * 0.01 - shotgunRig.position.x) * Math.min(1, 12 * dt);
-      shotgunRig.rotation.z += (Math.sin(bobPhase) * 0.02 - shotgunRig.rotation.z) * Math.min(1, 12 * dt);
+      const bobY = Math.sin(bobPhase * 2) * 0.015;
+      const bobX = Math.cos(bobPhase) * 0.01;
+      const bobRot = Math.sin(bobPhase) * 0.02;
+      
+      shotgunRig.position.y += ((baseY + bobY) * drawLerp - S.recoil * 0.5 - shotgunRig.position.y) * Math.min(1, 12 * dt);
+      shotgunRig.position.x += ((baseX + bobX) * drawLerp - shotgunRig.position.x) * Math.min(1, 12 * dt);
+      shotgunRig.rotation.z += ((bobRot * drawLerp + S.recoil * 0.8) - shotgunRig.rotation.z) * Math.min(1, 12 * dt);
     } else {
-      // Плавное возвращение в исходное положение
-      shotgunRig.position.y += (-0.35 - shotgunRig.position.y) * Math.min(1, 8 * dt);
-      shotgunRig.position.x += (0.45 - shotgunRig.position.x) * Math.min(1, 8 * dt);
-      shotgunRig.rotation.z += (0 - shotgunRig.rotation.z) * Math.min(1, 8 * dt);
+      // Плавное возвращение в исходное положение с учётом отдачи
+      shotgunRig.position.y += ((baseY * drawLerp - S.recoil * 0.5) - shotgunRig.position.y) * Math.min(1, 8 * dt);
+      shotgunRig.position.x += ((baseX * drawLerp) - shotgunRig.position.x) * Math.min(1, 8 * dt);
+      shotgunRig.rotation.z += ((S.recoil * 0.8) - shotgunRig.rotation.z) * Math.min(1, 8 * dt);
     }
+    
+    // Вращение при доставании
+    shotgunRig.rotation.x += ((-0.15 * (1 - drawLerp)) - shotgunRig.rotation.x) * Math.min(1, 6 * dt);
+    
     return;
   }
   axeRig.visible = false;
@@ -3591,9 +3921,21 @@ function execConsoleCommand(str) {
     consoleLog('coords <1|0> — показать/скрыть координаты');
     consoleLog('compass <1|0> — показать/скрыть компас');
     consoleLog('hitboxes <1|0> — показать/скрыть хитбоксы');
+    consoleLog('tp <x> <y> <z> — телепортироваться на координаты');
     consoleLog('clear — очистить консоль');
   } else if (cmd === 'clear') {
     consoleOutput.innerHTML = '';
+  } else if (cmd === 'tp') {
+    const x = parseFloat(args[1]);
+    const y = parseFloat(args[2]);
+    const z = parseFloat(args[3]);
+    if (isNaN(x) || isNaN(y) || isNaN(z)) {
+      consoleLog('usage: tp <x> <y> <z>', 'err');
+    } else {
+      player.pos.set(x, y, z);
+      camera.position.set(x, y + 1.6, z);
+      consoleLog(`teleported to (${x}, ${y}, ${z})`, 'ok');
+    }
   } else if (cmd === 'coords') {
     showCoords = args[1] === '1';
     document.getElementById('osdCoords').style.display = showCoords ? 'block' : 'none';
@@ -3647,6 +3989,7 @@ function execConsoleCommand(str) {
       p.position.y = spawnType === 'axe' ? AXE_REST_Y : 0;
       scene.add(p);
       propRoots.push(p);
+      globalProps.push(p);
       
       consoleLog('предмет заспавнен перед игроком: ' + spawnType, 'ok');
       consoleLog('подберите его клавишей [E]', 'ok');
@@ -3657,6 +4000,7 @@ function execConsoleCommand(str) {
       p.position.set(player.pos.x, 0, player.pos.z);
       scene.add(p);
       propRoots.push(p);
+      globalProps.push(p);
       consoleLog('spawned decor: ' + type, 'ok');
     } else if (what === 'static') {
       if (type === 'wall') {
@@ -3718,6 +4062,9 @@ function animate() {
   updateSmall(dt);
   updateSparks(dt);
   updateParticles(dt);
+  updatePelletTrails(dt);
+  updatePelletBullets(dt);
+  updateShellCasings(dt);
   updatePropHUD();
   
   // Разрядка батареи ПНВ при активном использовании
