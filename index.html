@@ -1640,7 +1640,8 @@ function boundaryOpen(gx, gy, type) {
 }
 
 const chunks = new Map();             // "cx,cz" -> chunk
-const propRoots = [];                 // все предметы в загруженных чанках (+ предмет в руках)
+const allProps = [];                  // ВСЕ предметы в мире (независимо от чанков) — для коллизий и физики
+const propRoots = [];                 // предметы в загруженных чанках (+ предмет в руках) — для рендеринга
 const dynamicProps = [];              // предметы в симуляции (брошенные)
 let heldProp = null;                  // предмет в руках игрока
 let activeColliders = [];             // плоский список AABB loaded-чанков
@@ -1804,7 +1805,7 @@ function generateChunk(cx, cz) {
     );
     prop.rotation.y = hash3(gx, gz, 0xA7B) * Math.PI * 2;
     group.add(prop);
-    propRoots.push(prop); props.push(prop);
+    propRoots.push(prop); props.push(prop); allProps.push(prop);
     if (kind === 'lamp') ownMats.push(prop.userData.bulbMat);
     // На столе/стуле могут быть коробка, топор, спички или батарейка — предмет получает опору
     if ((kind === 'table' && hash3(gx, gz, 0xA7C) < 0.25) || (kind === 'chair' && hash3(gx, gz, 0xA7C) < 0.12)) {
@@ -1821,7 +1822,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA80) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item);
+      propRoots.push(item); props.push(item); allProps.push(item); dynamicProps.push(item);
     }
     // На коробке может стоять батарейка или коробок спичек
     if (kind === 'box' && hash3(gx, gz, 0xA81) < 0.14) {
@@ -1834,7 +1835,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA84) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item);
+      propRoots.push(item); props.push(item); allProps.push(item); dynamicProps.push(item);
     }
   }
 
@@ -1851,7 +1852,7 @@ function generateChunk(cx, cz) {
     );
     mn.rotation.y = hash3(gx, gz, 0xA93) * Math.PI * 2;  // стоит и «смотрит» в случайную сторону
     group.add(mn);
-    propRoots.push(mn); props.push(mn);
+    propRoots.push(mn); props.push(mn); allProps.push(mn);
   }
 
   /* --- 9.8 Мелочёвка на полу: спичечные коробки и батарейки находятся уверенно --- */
@@ -1868,7 +1869,7 @@ function generateChunk(cx, cz) {
     );
     it.rotation.y = hash3(gx, gz, 0xA99) * Math.PI * 2;
     group.add(it);
-    propRoots.push(it); props.push(it); dynamicProps.push(it);
+    propRoots.push(it); props.push(it); allProps.push(it); dynamicProps.push(it);
   }
 
   scene.add(group);
@@ -1887,9 +1888,22 @@ function disposeChunk(ch) {
       return;
     }
     // Все предметы сохраняются в сцене при выгрузке чанка, чтобы их можно было подобрать/взаимодействовать
+    // Важно: сначала удаляем из родителя (группы чанка), затем добавляем в сцену
     if (p.parent) p.parent.remove(p);
     scene.add(p);
-    propRoots.push(p);
+    // НЕ добавляем обратно в propRoots - предмет остаётся в allProps навсегда
+    // Ключевое исправление: предмет должен быть в dynamicProps для корректной физики
+    // Сбрасываем поддержку, так как опора могла быть частью чанка
+    p.userData.support = null;
+    // Принудительно будим предмет и сбрасываем velocity для корректной симуляции
+    p.userData.sleeping = false;
+    p.userData.velocity.set(0, 0, 0);
+    p.userData.angularVel.set(0, 0, 0);
+    // Всегда добавляем в dynamicProps - предмет теперь независим от чанка
+    // Проверяем, нет ли уже в массиве (на случай дублирования)
+    if (dynamicProps.indexOf(p) < 0) {
+      dynamicProps.push(p);
+    }
   });
   
   scene.remove(ch.group);
@@ -2341,7 +2355,7 @@ const elChargeInner = document.getElementById('chargeInner');
 const PROP_NAMES = { chair: 'СТУЛ', table: 'СТОЛ', box: 'КОРОБКА', lamp: 'ТОРШЕР', axe: 'ТОПОР', battery: 'БАТАРЕЙКА', nvg_battery: 'БАТАРЕЯ ПНВ', matches: 'СПИЧКИ', mannequin: 'МАНЕКЕН', nvg: 'ПНВ', shotgun: 'ДРОБОВИК' };
 
 const pickRay = new THREE.Raycaster();
-pickRay.far = 2.6;
+pickRay.far = 0.6;
 const _pickNDC = new THREE.Vector2(0, 0);
 let rmbDown = false, rmbPressT = 0, chargePower = 0;
 let lmbDown = false, lmbPressT = 0;
@@ -2351,22 +2365,31 @@ let lmbDown = false, lmbPressT = 0;
 const _lookDir = new THREE.Vector3(), _lookTmp = new THREE.Vector3();
 function getLookedProp() {
   if (!controls.isLocked && !dragMode) return null;
-  pickRay.far = 10.0; // Увеличено с 2.6 до 10.0 для исправления бага с предметами далеко от спавна
+  pickRay.far = 3.0;
   pickRay.setFromCamera(_pickNDC, camera);
-  const hits = pickRay.intersectObjects(propRoots, true);
+  // Проверяем ВСЕ предметы через raycaster, а не только propRoots
+  // Это исправляет баг с хитбоками высоких предметов (торшер, манекен) далеко от спавна
+  const allCheckProps = [];
+  for (let i = 0; i < allProps.length; i++) {
+    const p = allProps[i];
+    if (p !== heldProp && p.parent) allCheckProps.push(p);
+  }
+  const hits = pickRay.intersectObjects(allCheckProps, true);
   if (hits.length) {
     let o = hits[0].object;
     while (o && !o.userData.isProp) o = o.parent;
     if (o && o !== heldProp) return o;
   }
+  // Фолбэк: проверка по направлению взгляда для предметов без родителя или если raycast не попал
   camera.getWorldDirection(_lookDir);
   let best = null, bestCos = Math.cos(0.24);
-  for (let i = 0; i < propRoots.length; i++) {
-    const q = propRoots[i];
+  for (let i = 0; i < allProps.length; i++) {
+    const q = allProps[i];
     if (q === heldProp) continue;
-    _lookTmp.copy(q.position); _lookTmp.y += 0.45; _lookTmp.sub(camera.position);
+    const targetY = q.position.y + (q.userData.hy || 0.45) * 0.5;
+    _lookTmp.copy(q.position); _lookTmp.y = targetY; _lookTmp.sub(camera.position);
     const d = _lookTmp.length();
-    if (d > 2.6 || d < 1e-4) continue;
+    if (d > 1.5 || d < 1e-4) continue;
     const cosA = _lookTmp.dot(_lookDir) / d;
     if (cosA > bestCos) { bestCos = cosA; best = q; }
   }
@@ -2381,6 +2404,7 @@ function setLampState(prop, on) {
 function removePropFromWorld(prop) {
   if (prop.parent) prop.parent.remove(prop);
   let i = propRoots.indexOf(prop); if (i >= 0) propRoots.splice(i, 1);
+  i = allProps.indexOf(prop); if (i >= 0) allProps.splice(i, 1);
   i = dynamicProps.indexOf(prop);  if (i >= 0) dynamicProps.splice(i, 1);
 }
 
@@ -2571,8 +2595,8 @@ const _sparkAt = new THREE.Vector3();
 function groundHeightFor(p, px, pz) {
   let best = 0, bestSup = null;
   const pr = p.userData.r * 0.8;
-  for (let i = 0; i < propRoots.length; i++) {
-    const q = propRoots[i];
+  for (let i = 0; i < allProps.length; i++) {
+    const q = allProps[i];
     if (q === p || q === heldProp) continue;
     const qu = q.userData;
     // Опора — любой неподвижный предмет с поверхностью
@@ -2584,6 +2608,7 @@ function groundHeightFor(p, px, pz) {
     const top = q.position.y + qu.topH;
     if (top > best && top <= p.position.y + 1.2) { best = top; bestSup = q; }
   }
+  // Если луч не нашёл опору среди предметов, возвращаем пол (0)
   p.userData._sup = bestSup;
   return best;
 }
@@ -2592,8 +2617,8 @@ function groundHeightFor(p, px, pz) {
 const propCols = []; // AABB предметов для игрока (габариты — из самой модели), пересчитывается каждый кадр
 function buildPropCols() {
   propCols.length = 0;
-  for (let i = 0; i < propRoots.length; i++) {
-    const q = propRoots[i];
+  for (let i = 0; i < allProps.length; i++) {
+    const q = allProps[i];
     if (q === heldProp) continue;
     const u = q.userData;
     if (!u.hx) continue;
@@ -2664,8 +2689,8 @@ function updateDynamics(dt) {
 function collideProps(p) {
   const pu = p.userData;
   const ph = pu.hy;
-  for (let j = 0; j < propRoots.length; j++) {
-    const q = propRoots[j];
+  for (let j = 0; j < allProps.length; j++) {
+    const q = allProps[j];
     if (q === p || q === heldProp) continue;
     const qu = q.userData;
     if (!qu.hx) continue;
@@ -2689,8 +2714,8 @@ function collideProps(p) {
 
 // Летящий топор бьёт предметы (и манекенов) по сфере вокруг себя
 function axeHitsProps(p, v, av) {
-  for (let j = 0; j < propRoots.length; j++) {
-    const q = propRoots[j];
+  for (let j = 0; j < allProps.length; j++) {
+    const q = allProps[j];
     if (q === p || q === heldProp) continue;
     const rr = p.userData.r + (q.userData.r || 0.3) * 0.7;
     const dx = q.position.x - p.position.x;
@@ -3770,6 +3795,17 @@ window.addEventListener('pointerup', e => {
     else if (heldProp) placeHeld();                                       // торшер — только E
     else if (!heldSmall) { const p = getLookedProp(); if (p) pickUp(p); }
   } else if (heldProp) {
+    // Выбрасываем предмет: если это топор или дробовик, сбрасываем флаг инвентаря
+    // чтобы предмет стал обычным физическим объектом
+    if (heldProp.userData.kind === 'axe') {
+      inv.axe = false;
+      inv.axeProp = null;
+      updateInvSlotAxe();
+    } else if (heldProp.userData.kind === 'shotgun') {
+      inv.shotgun = false;
+      inv.shotgunProp = null;
+      updateInvSlotShotgun();
+    }
     throwHeld(chargePower);
   }
 });
@@ -3948,6 +3984,12 @@ function execConsoleCommand(str) {
       p.position.y = spawnType === 'axe' ? AXE_REST_Y : 0;
       scene.add(p);
       propRoots.push(p);
+      allProps.push(p);
+      // Дробовик и топор должны иметь физику сразу после спавна
+      if (spawnType === 'axe' || spawnType === 'shotgun') {
+        dynamicProps.push(p);
+        p.userData.sleeping = false;
+      }
       
       consoleLog('предмет заспавнен перед игроком: ' + spawnType, 'ok');
       consoleLog('подберите его клавишей [E]', 'ok');
@@ -3958,6 +4000,8 @@ function execConsoleCommand(str) {
       p.position.set(player.pos.x, 0, player.pos.z);
       scene.add(p);
       propRoots.push(p);
+      allProps.push(p);
+      dynamicProps.push(p);
       consoleLog('spawned decor: ' + type, 'ok');
     } else if (what === 'static') {
       if (type === 'wall') {
@@ -4049,8 +4093,8 @@ function animate() {
 
   // Общий свет торшеров — у ближайшего включённого (число источников в сцене постоянно)
   let bestLamp = null, bestD2 = 1e9;
-  for (let i = 0; i < propRoots.length; i++) {
-    const q = propRoots[i];
+  for (let i = 0; i < allProps.length; i++) {
+    const q = allProps[i];
     if (q.userData.kind !== 'lamp' || !q.userData.on) continue;
     const dx = q.position.x - player.pos.x, dz = q.position.z - player.pos.z;
     const d2 = dx * dx + dz * dz;
