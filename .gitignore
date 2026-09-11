@@ -25,6 +25,10 @@ build/
 target/
 .gradle/
 
+# System files
+.DS_Store
+Thumbs.db
+
 # Compiled files
 *.pyc
 *.class
@@ -35,10 +39,6 @@ target/
 *.a
 *.obj
 *.out
-
-# System files
-.DS_Store
-Thumbs.db
 
 # Coverage
 coverage/
