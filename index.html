@@ -1642,7 +1642,6 @@ function boundaryOpen(gx, gy, type) {
 const chunks = new Map();             // "cx,cz" -> chunk
 const propRoots = [];                 // все предметы в загруженных чанках (+ предмет в руках)
 const dynamicProps = [];              // предметы в симуляции (брошенные)
-const globalProps = [];               // ВСЕ предметы в мире (для сохранения при выгрузке чанков)
 let heldProp = null;                  // предмет в руках игрока
 let activeColliders = [];             // плоский список AABB loaded-чанков
 let litFixtures = [];                 // все лампы (stable+flicker) loaded-чанков
@@ -1805,7 +1804,7 @@ function generateChunk(cx, cz) {
     );
     prop.rotation.y = hash3(gx, gz, 0xA7B) * Math.PI * 2;
     group.add(prop);
-    propRoots.push(prop); props.push(prop); globalProps.push(prop);
+    propRoots.push(prop); props.push(prop);
     if (kind === 'lamp') ownMats.push(prop.userData.bulbMat);
     // На столе/стуле могут быть коробка, топор, спички или батарейка — предмет получает опору
     if ((kind === 'table' && hash3(gx, gz, 0xA7C) < 0.25) || (kind === 'chair' && hash3(gx, gz, 0xA7C) < 0.12)) {
@@ -1822,7 +1821,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA80) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item); globalProps.push(item);
+      propRoots.push(item); props.push(item); dynamicProps.push(item);
     }
     // На коробке может стоять батарейка или коробок спичек
     if (kind === 'box' && hash3(gx, gz, 0xA81) < 0.14) {
@@ -1835,7 +1834,7 @@ function generateChunk(cx, cz) {
       item.rotation.y = hash3(gx, gz, 0xA84) * Math.PI * 2;
       item.userData.support = { p: prop, top: prop.userData.topH };
       group.add(item);
-      propRoots.push(item); props.push(item); dynamicProps.push(item); globalProps.push(item);
+      propRoots.push(item); props.push(item); dynamicProps.push(item);
     }
   }
 
@@ -1852,7 +1851,7 @@ function generateChunk(cx, cz) {
     );
     mn.rotation.y = hash3(gx, gz, 0xA93) * Math.PI * 2;  // стоит и «смотрит» в случайную сторону
     group.add(mn);
-    propRoots.push(mn); props.push(mn); globalProps.push(mn);
+    propRoots.push(mn); props.push(mn);
   }
 
   /* --- 9.8 Мелочёвка на полу: спичечные коробки и батарейки находятся уверенно --- */
@@ -1869,7 +1868,7 @@ function generateChunk(cx, cz) {
     );
     it.rotation.y = hash3(gx, gz, 0xA99) * Math.PI * 2;
     group.add(it);
-    propRoots.push(it); props.push(it); dynamicProps.push(it); globalProps.push(it);
+    propRoots.push(it); props.push(it); dynamicProps.push(it);
   }
 
   scene.add(group);
@@ -1891,7 +1890,6 @@ function disposeChunk(ch) {
     if (p.parent) p.parent.remove(p);
     scene.add(p);
     propRoots.push(p);
-    // НЕ удаляем из globalProps - предмет остаётся в глобальном списке
   });
   
   scene.remove(ch.group);
@@ -1913,16 +1911,6 @@ function rebuildActiveLists() {
       if (f.state !== 2) litFixtures.push(f);
       if (f.state === 1) flickerFixtures.push(f);
     });
-    // Добавляем предметы чанка в propRoots и dynamicProps
-    ch.props.forEach(p => {
-      if (propRoots.indexOf(p) < 0) propRoots.push(p);
-      if (p.userData && !p.userData.sleeping && dynamicProps.indexOf(p) < 0) dynamicProps.push(p);
-    });
-  });
-  // Также добавляем все глобальные предметы, которые не в чанках (выброшенные игроком)
-  globalProps.forEach(p => {
-    if (p.parent === scene && propRoots.indexOf(p) < 0) propRoots.push(p);
-    if (p.userData && !p.userData.sleeping && p !== heldProp && dynamicProps.indexOf(p) < 0) dynamicProps.push(p);
   });
 }
 
@@ -1995,7 +1983,6 @@ let zoomFov = 75, flashIntensity = 0;
 let started = false, startT = 0;
 
 let noclip = false;
-
 const player = {
   pos: new THREE.Vector3(CELL * 0.5, 0, CELL * 0.5),
   vel: new THREE.Vector3(),
@@ -2061,38 +2048,27 @@ window.addEventListener('keydown', e => {
         prop.visible = false;
         prop.userData.velocity.set(0, 0, 0);
         prop.userData.angularVel.set(0, 0, 0);
-        // Удаляем из globalProps и dynamicProps
-        const idxG = globalProps.indexOf(prop);
-        if (idxG >= 0) globalProps.splice(idxG, 1);
-        const idxD = dynamicProps.indexOf(prop);
-        if (idxD >= 0) dynamicProps.splice(idxD, 1);
         inv.shotgun = true;
-        inv.shotgunProp = prop;
+        inv.shotgunProp = prop; // Сохраняем объект в инвентаре
         updateInvSlotShotgun();
         noteShow('ДРОБОВИК УБРАН');
       } else if (inv.shotgun && !heldProp) {
         // Достать дробовик из инвентаря
-        const p = inv.shotgunProp;
-        if (p) {
-          heldProp = p;
-          p.userData.velocity.set(0, 0, 0);
-          p.userData.angularVel.set(0, 0, 0);
-          inv.shotgun = false;
-          inv.shotgunProp = null;
-          updateInvSlotShotgun();
-          noteShow('ДРОБОВИК В РУКАХ · ЛКМ — ВЫСТРЕЛ · R — ПЕРЕЗАРЯДКА');
+        const p = inv.shotgunProp || makeProp('shotgun');
+        if (inv.shotgunProp) {
+          inv.shotgunProp.visible = true;
+          inv.shotgunProp.position.copy(camera.position);
+        } else {
+          p.position.copy(camera.position);
+          scene.add(p);
         }
-      } else if (!heldProp) {
-        // Если дробовик не в инвентаре, ищем его в мире
-        let foundShotgun = null;
-        scene.traverse((obj) => {
-          if (obj.userData && obj.userData.kind === 'shotgun' && !foundShotgun) {
-            foundShotgun = obj;
-          }
-        });
-        if (foundShotgun) {
-          pickUp(foundShotgun, true);
-        }
+        heldProp = p;
+        p.userData.velocity.set(0, 0, 0);
+        p.userData.angularVel.set(0, 0, 0);
+        inv.shotgun = false;
+        inv.shotgunProp = null;
+        updateInvSlotShotgun();
+        noteShow('ДРОБОВИК В РУКАХ · ЛКМ — ВЫСТРЕЛ · R — ПЕРЕЗАРЯДКА');
       }
     }
     // Перезарядка дробовика на R
@@ -2406,7 +2382,6 @@ function removePropFromWorld(prop) {
   if (prop.parent) prop.parent.remove(prop);
   let i = propRoots.indexOf(prop); if (i >= 0) propRoots.splice(i, 1);
   i = dynamicProps.indexOf(prop);  if (i >= 0) dynamicProps.splice(i, 1);
-  i = globalProps.indexOf(prop);   if (i >= 0) globalProps.splice(i, 1);
 }
 
 function pickUp(prop, forceEquip = false) {
@@ -2487,7 +2462,6 @@ function pickUp(prop, forceEquip = false) {
   axeAnim.charging = false;
   elChargeOuter.style.opacity = '0'; elChargeInner.style.width = '0%';
   const i = dynamicProps.indexOf(prop); if (i >= 0) dynamicProps.splice(i, 1);
-  const g = globalProps.indexOf(prop); if (g >= 0) globalProps.splice(g, 1);
   AudioSys.click(520);
 }
 
@@ -2508,7 +2482,6 @@ function placeHeld() {
   prop.userData.stuck = false;
   prop.userData.sleeping = false;
   dynamicProps.push(prop);
-  globalProps.push(prop);                     // возвращаем в глобальный список
   AudioSys.click(420);
 }
 
@@ -2522,20 +2495,7 @@ function throwHeld(power) {
   prop.userData.support = null;
   prop.userData.stuck = false;
   prop.userData.sleeping = false;
-  
-  // Если это дробовик, сбрасываем его состояние и возвращаем в мир
-  if (prop.userData.kind === 'shotgun') {
-    prop.quaternion.set(0, 0, 0, 1); // Сброс вращения
-    const vel = fwd.multiplyScalar(3.5 + power * 8);
-    vel.y += 1.2 + power * 2;
-    prop.userData.velocity.copy(vel);
-    prop.userData.angularVel.set(
-      (Math.random() - 0.5) * 6 * power + 1.5,
-      (Math.random() - 0.5) * 4 * power,
-      (Math.random() - 0.5) * 6 * power + 1.5
-    );
-    AudioSys.step(0.9);
-  } else if (prop.userData.kind === 'axe') {
+  if (prop.userData.kind === 'axe') {
     axeModelGrp.getWorldQuaternion(_axeWQ);           // вылетает в том повороте, как был в руке
     prop.quaternion.copy(_axeWQ);
     axeAnim.charging = false;
@@ -2563,7 +2523,6 @@ function throwHeld(power) {
     AudioSys.step(0.9);
   }
   dynamicProps.push(prop);
-  globalProps.push(prop);                             // возвращаем в глобальный список
 }
 
 function toggleLampHeld() {
@@ -3989,7 +3948,6 @@ function execConsoleCommand(str) {
       p.position.y = spawnType === 'axe' ? AXE_REST_Y : 0;
       scene.add(p);
       propRoots.push(p);
-      globalProps.push(p);
       
       consoleLog('предмет заспавнен перед игроком: ' + spawnType, 'ok');
       consoleLog('подберите его клавишей [E]', 'ok');
@@ -4000,7 +3958,6 @@ function execConsoleCommand(str) {
       p.position.set(player.pos.x, 0, player.pos.z);
       scene.add(p);
       propRoots.push(p);
-      globalProps.push(p);
       consoleLog('spawned decor: ' + type, 'ok');
     } else if (what === 'static') {
       if (type === 'wall') {
