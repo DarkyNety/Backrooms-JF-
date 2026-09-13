@@ -269,7 +269,8 @@
 {
   "imports": {
     "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+    "./ak47.js": "./ak47.js"
   }
 }
 </script>
@@ -326,12 +327,17 @@
         <svg viewBox="0 0 24 24" class="slotIcon"><rect x="3" y="10" width="18" height="4" fill="currentColor" rx="1"/><rect x="14" y="8" width="7" height="3" fill="currentColor" opacity=".7"/></svg>
         <span class="slotCount" id="shotgunState">—</span>
       </div>
+      <div class="invSlot" id="slotAK47" style="opacity:.45">
+        <span class="slotLabel">АК-47 [2]</span>
+        <svg viewBox="0 0 24 24" class="slotIcon"><rect x="2" y="9" width="20" height="6" fill="currentColor" rx="1"/><path d="M4 9V6h8v3M14 9l4-2v10l-4-2" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+        <span class="slotCount" id="ak47State">—</span>
+      </div>
       <div class="invSlot invEmpty">—</div>
       <div class="invSlot invEmpty">—</div>
     </div>
     <div class="invHint">I — ЗАКРЫТЬ · Q — КОРОБОК В РУКИ · БАТАРЕЙКИ: +20% К ФОНАРЮ</div>
   </div>
-  <div id="hint">WASD — движение · SHIFT — бег · SPACE — прыжок · CTRL — присесть · F — фонарь · N — ПНВ · 1 — дробовик · 3 — топор · R — перезарядка · E — взять/поставить · I — инвентарь · Q — коробок · J — ноуклип · ` — консоль · ЛКМ — замах/стрелять · ПКМ — бросок/открыть · G — бросить спичку · +/− — зум · M — звук</div>
+  <div id="hint">WASD — движение · SHIFT — бег · SPACE — прыжок · CTRL — присесть · F — фонарь · N — ПНВ · 1/2 — оружие (дробовик/АК-47) · 3 — топор · R — перезарядка · E — взять/поставить · I — инвентарь · Q — коробок · J — ноуклип · ` — консоль · ЛКМ — замах/стрелять · ПКМ — бросок/открыть · G — бросить спичку · +/− — зум · M — звук</div>
   <div class="osd-bottom">
     <span id="osdStatus">ФОНАРЬ: ВЫКЛ</span>
     <span id="nvgStatus"></span>
@@ -349,7 +355,7 @@
     <input type="text" id="consoleInputField" autocomplete="off" spellcheck="false" />
   </div>
   <div id="consoleHelp">
-    <span>spawn item &lt;nvg|matches|battery|axe|shotgun|shotgun_bullet|nvg_battery&gt;</span>
+    <span>spawn item &lt;nvg|matches|battery|axe|shotgun|ak47|shotgun_bullet|nvg_battery&gt;</span>
     <span>spawn decor &lt;table|chair|torch|box&gt;</span>
     <span>spawn static &lt;lamp type=on|off|broken|flicking|wall&gt;</span>
     <span>coords &lt;1|0&gt; · compass &lt;1|0&gt; · hitboxes &lt;1|0&gt;</span>
@@ -428,6 +434,7 @@ import { ShaderPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postpro
 import { UnrealBloomPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'https://unpkg.com/three@0.160.0/examples/jsm/postprocessing/OutputPass.js';
 import { mergeGeometries } from 'https://unpkg.com/three@0.160.0/examples/jsm/utils/BufferGeometryUtils.js';
+import { createAK47 } from './ak47.js';
 
 /* ================================ 1. УТИЛИТЫ ================================ */
 
@@ -1178,6 +1185,12 @@ let shotgunReloadTime = 0;
 const SHOTGUN_RELOAD_DURATION = 1.2; // секунды
 let shotgunPumpOffset = 0; // смещение цевья для анимации
 
+/* ---------- Перезарядка АК-47 (смена магазина) ---------- */
+let ak47Reloading = false;
+let ak47ReloadTime = 0;
+const AK47_RELOAD_DURATION = 2.2; // секунды
+let ak47MagOffset = 0; // смещение магазина для анимации
+
 function startShotgunReload() {
   if (inv.shells >= 8) {
     noteShow('ДРОБОВИК ПОЛОН');
@@ -1220,6 +1233,54 @@ function updateShotgunReload(dt) {
     updateInvSlotShotgun();
     noteShow(`ПАТРОН ЗАРЯЖЕН · ${inv.shells}/8`);
     AudioSys.shotgunPump();
+  }
+}
+
+function startAK47Reload() {
+  if (inv.ak47Magazines <= 0) {
+    noteShow('НЕТ МАГАЗИНОВ');
+    return;
+  }
+  if (inv.ak47CurrentMag >= 30) {
+    noteShow('МАГАЗИН ПОЛОН');
+    return;
+  }
+  ak47Reloading = true;
+  ak47ReloadTime = 0;
+  AudioSys.ak47Reload();
+  noteShow('ПЕРЕЗАРЯДКА...');
+}
+
+function updateAK47Reload(dt) {
+  if (!ak47Reloading) return;
+  
+  ak47ReloadTime += dt;
+  
+  // Анимация смены магазина: магазин опускается и поднимается
+  const t = ak47ReloadTime / AK47_RELOAD_DURATION;
+  if (t < 0.4) {
+    // Фаза 1: магазин опускается
+    ak47MagOffset = t / 0.4 * 0.25;
+  } else if (t < 0.7) {
+    // Фаза 2: пауза (магазин снят)
+    ak47MagOffset = 0.25;
+  } else if (t < 1.0) {
+    // Фаза 3: новый магазин поднимается
+    ak47MagOffset = 0.25 - ((t - 0.7) / 0.3) * 0.25;
+  } else {
+    ak47MagOffset = 0;
+  }
+  
+  if (ak47ReloadTime >= AK47_RELOAD_DURATION) {
+    ak47Reloading = false;
+    ak47ReloadTime = 0;
+    ak47MagOffset = 0;
+    // Сменяем магазин: полный магазин
+    inv.ak47Magazines--;
+    inv.ak47CurrentMag = 30;
+    updateInvSlotAK47();
+    noteShow(`МАГАЗИН СМЕНЁН · ${inv.ak47CurrentMag}/30`);
+    AudioSys.ak47MagIn();
   }
 }
 
@@ -1590,6 +1651,34 @@ function makeProp(kind) {
     root.scale.setScalar(0.8);
     root.quaternion.copy(axeRestQuat(Math.random() * Math.PI * 2));
     r = 0.4; mass = 3.5;
+  } else if (kind === 'ak47') { // АК-47
+    const akModel = createAK47();
+    // Модель уже имеет правильный масштаб и ориентацию внутри createAK47()
+    // Поворот на 90° чтобы ствол смотрел вправо при виде сверху
+    akModel.rotation.set(0, Math.PI / 2, 0);
+    root.add(akModel);
+    r = 0.45; mass = 3.8;
+  } else if (kind === 'ak47_mag') { // Магазин для АК-47
+    // Создаём упрощённую модель магазина (изогнутая коробка)
+    const magShape = new THREE.Shape();
+    magShape.moveTo(0, 0);
+    magShape.lineTo(0.08, 0);
+    magShape.lineTo(0.1, 0.04);
+    magShape.lineTo(0.1, 0.18);
+    magShape.lineTo(0.08, 0.22);
+    magShape.lineTo(0, 0.22);
+    magShape.lineTo(-0.02, 0.18);
+    magShape.lineTo(-0.02, 0.04);
+    magShape.lineTo(0, 0);
+    
+    const magGeo = new THREE.ExtrudeGeometry(magShape, { depth: 0.04, bevelEnabled: true, bevelThickness: 0.005, bevelSize: 0.005, bevelSegments: 2 });
+    magGeo.translate(-0.04, -0.11, -0.02);
+    const magMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.7, metalness: 0.3 });
+    const m = new THREE.Mesh(magGeo, magMat);
+    m.castShadow = true;
+    root.add(m);
+    root.quaternion.copy(axeRestQuat(Math.random() * Math.PI * 2));
+    r = 0.15; mass = 0.5;
   } else { // торшер
     const metal = new THREE.Mesh(lampMetalGeo, lampMetalMat);
     const shade = new THREE.Mesh(lampShadeGeo, lampShadeMat);
@@ -2055,6 +2144,7 @@ window.addEventListener('keydown', e => {
     }
     // Дробовик в инвентаре на клавишу 1
     if (e.code === 'Digit1' && document.body.classList.contains('playing')) {
+      // Обработка переключения дробовика
       if (heldProp && heldProp.userData.kind === 'shotgun') {
         // Убрать дробовик из рук в инвентарь
         const prop = heldProp;
@@ -2063,7 +2153,7 @@ window.addEventListener('keydown', e => {
         prop.userData.velocity.set(0, 0, 0);
         prop.userData.angularVel.set(0, 0, 0);
         inv.shotgun = true;
-        inv.shotgunProp = prop; // Сохраняем объект в инвентаре
+        inv.shotgunProp = prop;
         updateInvSlotShotgun();
         noteShow('ДРОБОВИК УБРАН');
       } else if (inv.shotgun && !heldProp) {
@@ -2084,16 +2174,87 @@ window.addEventListener('keydown', e => {
         updateInvSlotShotgun();
         noteShow('ДРОБОВИК В РУКАХ · ЛКМ — ВЫСТРЕЛ · R — ПЕРЕЗАРЯДКА');
       }
+      // Обработка переключения АК-47 (если дробовика нет в руках и не подобран)
+      else if (heldProp && heldProp.userData.kind === 'ak47') {
+        // Убрать АК-47 в инвентарь
+        const prop = heldProp;
+        heldProp = null;
+        prop.visible = false;
+        prop.userData.velocity.set(0, 0, 0);
+        prop.userData.angularVel.set(0, 0, 0);
+        inv.ak47 = true;
+        inv.ak47Prop = prop;
+        updateInvSlotAK47();
+        noteShow('АК-47 УБРАН');
+      } else if (inv.ak47 && !heldProp) {
+        // Достать АК-47 из инвентаря
+        const p = inv.ak47Prop || makeProp('ak47');
+        if (inv.ak47Prop) {
+          inv.ak47Prop.visible = true;
+          inv.ak47Prop.position.copy(camera.position);
+        } else {
+          p.position.copy(camera.position);
+          scene.add(p);
+        }
+        heldProp = p;
+        p.userData.velocity.set(0, 0, 0);
+        p.userData.angularVel.set(0, 0, 0);
+        inv.ak47 = false;
+        inv.ak47Prop = null;
+        updateInvSlotAK47();
+        noteShow('АК-47 В РУКАХ · ЛКМ — ОГОНЬ · R — ПЕРЕЗАРЯДКА');
+      }
+    }
+    // Переключение АК-47 на клавишу 2 (альтернативное)
+    if (e.code === 'Digit2' && document.body.classList.contains('playing')) {
+      if (heldProp && heldProp.userData.kind === 'ak47') {
+        // Убрать АК-47 в инвентарь
+        const prop = heldProp;
+        heldProp = null;
+        prop.visible = false;
+        prop.userData.velocity.set(0, 0, 0);
+        prop.userData.angularVel.set(0, 0, 0);
+        inv.ak47 = true;
+        inv.ak47Prop = prop; // Сохраняем объект в инвентаре
+        updateInvSlotAK47();
+        noteShow('АК-47 УБРАН');
+      } else if (inv.ak47 && !heldProp) {
+        // Достать АК-47 из инвентаря
+        const p = inv.ak47Prop || makeProp('ak47');
+        if (inv.ak47Prop) {
+          inv.ak47Prop.visible = true;
+          inv.ak47Prop.position.copy(camera.position);
+        } else {
+          p.position.copy(camera.position);
+          scene.add(p);
+        }
+        heldProp = p;
+        p.userData.velocity.set(0, 0, 0);
+        p.userData.angularVel.set(0, 0, 0);
+        inv.ak47 = false;
+        inv.ak47Prop = null;
+        updateInvSlotAK47();
+        noteShow('АК-47 В РУКАХ · ЛКМ — ОГОНЬ · R — ПЕРЕЗАРЯДКА');
+      }
     }
     // Перезарядка дробовика на R
     if (e.code === 'KeyR' && document.body.classList.contains('playing')) {
       if (heldProp && heldProp.userData.kind === 'shotgun' && !shotgunReloading) {
         startShotgunReload();
+      } else if (heldProp && heldProp.userData.kind === 'ak47' && !ak47Reloading) {
+        startAK47Reload();
       }
     }
     if (e.code === 'KeyE' && document.body.classList.contains('playing')) {
       if (heldProp) {
-        if (heldProp.userData.kind === 'lamp') toggleLampHeld(); else placeHeld();
+        // Если в руках оружие (дробовик или АК-47), то E не работает для взаимодействия
+        if (heldProp.userData.kind === 'shotgun' || heldProp.userData.kind === 'ak47') {
+          noteShow('СНАЧАЛА УБЕРИ ОРУЖИЕ [1] ИЛИ [2]');
+        } else if (heldProp.userData.kind === 'lamp') {
+          toggleLampHeld();
+        } else {
+          placeHeld();
+        }
       } else if (!heldSmall) {
         const p = getLookedProp();
         if (p) pickUp(p);
@@ -2442,6 +2603,23 @@ function pickUp(prop, forceEquip = false) {
       return;
     }
   }
+  // АК-47 — в инвентарь (клавиша 1 или 2) или экипировать сразу при forceEquip
+  if (prop.userData.kind === 'ak47') {
+    if (!inv.ak47 && !heldProp) {
+      inv.ak47 = true;
+      inv.ak47Magazines = 3; // Начальные магазины (3 шт)
+      inv.ak47CurrentMag = 30; // Патроны в текущем магазине
+      removePropFromWorld(prop);
+      AudioSys.click(520);
+      noteShow('АК-47: НАЖМИТЕ [1] ИЛИ [2] · МАГАЗИНЫ: ' + inv.ak47Magazines);
+      updateInvSlotAK47();
+      return;
+    } else if (forceEquip) {
+      // Если уже есть АК, но forceEquip=true — просто убираем предмет с земли
+      removePropFromWorld(prop);
+      return;
+    }
+  }
   // Батарея ПНВ — зарядка 50%
   if (prop.userData.kind === 'nvg_battery') {
     nvgBattery = Math.min(1, nvgBattery + 0.5);
@@ -2458,6 +2636,15 @@ function pickUp(prop, forceEquip = false) {
     AudioSys.click(700);
     noteShow(`ПАТРОНЫ +4 · ВСЕГО: ${inv.shells}`);
     updateInvSlotShotgun();
+    return;
+  }
+  // Магазин для АК-47
+  if (prop.userData.kind === 'ak47_mag') {
+    inv.ak47Magazines = Math.min(10, inv.ak47Magazines + 1);
+    removePropFromWorld(prop);
+    AudioSys.click(720);
+    noteShow(`МАГАЗИН АК +1 · ВСЕГО: ${inv.ak47Magazines}`);
+    updateInvSlotAK47();
     return;
   }
   // Мелочёвка не берётся в руки как мебель — сразу применяется
@@ -3029,6 +3216,7 @@ function updatePropHUD() {
       if (p.userData.kind === 'battery') { text = 'БАТАРЕЙКА · [E] В ФОНАРИК (+20%)'; show = true; }
       else if (p.userData.kind === 'nvg_battery') { text = 'БАТАРЕЯ ПНВ · [E] ЗАРЯДИТЬ (+50%)'; show = true; }
       else if (p.userData.kind === 'shotgun_bullet') { text = 'ПАТРОНЫ · [E] ВЗЯТЬ (+4)'; show = true; }
+      else if (p.userData.kind === 'ak47_mag') { text = 'МАГАЗИН АК · [E] ВЗЯТЬ (+1)'; show = true; }
       else if (p.userData.kind === 'matches') { text = 'СПИЧКИ · [E] ВЗЯТЬ'; show = true; }
       else { text = `МАССА: ${p.userData.mass} КГ · ${PROP_NAMES[p.userData.kind]}  [E]`; show = true; }
     }
@@ -3078,7 +3266,9 @@ const inv = {
   matchboxes: 0, matches: 0, 
   axe: false, axeProp: null, 
   shotgun: false, shotgunProp: null, 
-  shells: 0 
+  ak47: false, ak47Prop: null,
+  shells: 0, ak47Magazines: 0,
+  currentWeapon: null // 'shotgun' | 'ak47' | 'axe' | null
 };
 
 function updateInvSlotAxe() {
@@ -3099,6 +3289,18 @@ function updateInvSlotShotgun() {
   if (inv.shotgun) {
     slot.style.opacity = '1';
     state.textContent = inv.shells > 0 ? inv.shells : '∅';
+  } else {
+    slot.style.opacity = '0.45';
+    state.textContent = '—';
+  }
+}
+
+function updateInvSlotAK47() {
+  const slot = document.getElementById('slotAK47');
+  const state = document.getElementById('ak47State');
+  if (inv.ak47) {
+    slot.style.opacity = '1';
+    state.textContent = inv.ak47Magazines > 0 ? inv.ak47Magazines : '∅';
   } else {
     slot.style.opacity = '0.45';
     state.textContent = '—';
@@ -3805,6 +4007,10 @@ window.addEventListener('pointerup', e => {
       inv.shotgun = false;
       inv.shotgunProp = null;
       updateInvSlotShotgun();
+    } else if (heldProp.userData.kind === 'ak47') {
+      inv.ak47 = false;
+      inv.ak47Prop = null;
+      updateInvSlotAK47();
     }
     throwHeld(chargePower);
   }
@@ -3961,7 +4167,7 @@ function execConsoleCommand(str) {
     const what = args[1];
     const type = args[2] || args.args[2];
     if (what === 'item') {
-      const items = ['nvg', 'matches', 'battery', 'axe', 'shotgun', 'shotgun_bullet', 'nvg_battery'];
+      const items = ['nvg', 'matches', 'battery', 'axe', 'shotgun', 'shotgun_bullet', 'nvg_battery', 'ak47'];
       if (!items.includes(type)) { consoleLog('unknown item: ' + type, 'err'); return; }
       
       // Если игрок уже подобрал дробовик, спавним патроны вместо дробовика
@@ -3975,6 +4181,11 @@ function execConsoleCommand(str) {
         spawnType = 'nvg_battery';
         consoleLog('ПНВ уже подобран, спавним батарею', 'ok');
       }
+      // Если игрок уже имеет АК-47 в инвентаре/руках, спавним магазин вместо автомата
+      if (type === 'ak47' && (inv.ak47 || (heldProp && heldProp.userData.kind === 'ak47'))) {
+        spawnType = 'ak47_mag';
+        consoleLog('АК-47 уже есть, спавним магазин', 'ok');
+      }
       
       const p = makeProp(spawnType);
       // Позиция перед игроком
@@ -3986,7 +4197,7 @@ function execConsoleCommand(str) {
       propRoots.push(p);
       allProps.push(p);
       // Дробовик и топор должны иметь физику сразу после спавна
-      if (spawnType === 'axe' || spawnType === 'shotgun') {
+      if (spawnType === 'axe' || spawnType === 'shotgun' || spawnType === 'ak47') {
         dynamicProps.push(p);
         p.userData.sleeping = false;
       }
